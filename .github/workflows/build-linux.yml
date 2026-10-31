@@ -42,25 +42,15 @@ jobs:
             [Snapshot]="TYWLauncher-linux-x64-snapshot.tar.gz"
             [Beta]="TYWLauncher-linux-x64-beta.tar.gz"
           )
+          DESKTOP='[Desktop Entry]\nType=Application\nName=TYW Launcher\nGenericName=Minecraft Launcher\nExec=tyw-launcher\nIcon=tyw-launcher\nCategories=Game;\n'
+          WRAPPER='#!/bin/sh\nHERE="$(dirname "$(readlink -f "$0")")"\nexec "$HERE/TYWLauncher" "$@"\n'
           for ch in Release Snapshot Beta; do
             stage="stage/pkg-$ch/tyw-launcher-1.0.0"
             mkdir -p "$stage"
             cp -a "out/ch-$ch/." "$stage/"
             cp packaging/icons/tyw-256.png "$stage/tyw-launcher.png"
-            cat > "$stage/tyw-launcher.desktop" <<'EOF'
-[Desktop Entry]
-Type=Application
-Name=TYW Launcher
-GenericName=Minecraft Launcher
-Exec=tyw-launcher
-Icon=tyw-launcher
-Categories=Game;
-EOF
-            cat > "$stage/tyw-launcher" <<'EOF'
-#!/bin/sh
-HERE="$(dirname "$(readlink -f "$0")")"
-exec "$HERE/TYWLauncher" "$@"
-EOF
+            printf "$DESKTOP" > "$stage/tyw-launcher.desktop"
+            printf "$WRAPPER" > "$stage/tyw-launcher"
             chmod +x "$stage/tyw-launcher" "$stage/TYWLauncher"
             tar -C "stage/pkg-$ch" -czf "dist/${NAME[$ch]}" tyw-launcher-1.0.0
             rm -rf "stage/pkg-$ch"
