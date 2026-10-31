@@ -73,24 +73,86 @@
       </Grid>
     </Grid>
 
-    <!-- 启动中：对应 PageLaunchLeft 的 PanLaunching（进度环 + 阶段文字 + 取消） -->
+    <!-- 启动中：对应 PageLaunchLeft 的 PanLaunching（镐子动画 + 进度条 + 信息表 + 取消） -->
     <Grid x:Name="PanLaunching" IsVisible="False" Opacity="0" RenderTransformOrigin="0.5,0.5">
       <Grid.RenderTransform>
-        <TranslateTransform />
+        <ScaleTransform ScaleX="0.8" ScaleY="0.8" />
       </Grid.RenderTransform>
-      <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
-        <Grid Width="76" Height="76" HorizontalAlignment="Center">
-          <Ellipse Width="76" Height="76" Stroke="{StaticResource ColorBrushGray6}" StrokeThickness="5" />
-          <Path x:Name="PathProgress" Stroke="{StaticResource ColorBrush1}" StrokeThickness="5"
-                StrokeLineCap="Round" StrokeJoin="Round" />
-          <TextBlock x:Name="LabPercent" HorizontalAlignment="Center" VerticalAlignment="Center"
-                     FontSize="14" FontWeight="Bold" Foreground="{StaticResource ColorBrush1}" Text="0%" />
+      <Grid.RowDefinitions>
+        <RowDefinition Height="*" />
+        <RowDefinition Height="Auto" />
+        <RowDefinition Height="*" />
+        <RowDefinition Height="Auto" />
+      </Grid.RowDefinitions>
+
+      <StackPanel Grid.Row="1" Margin="0,-7,0,0">
+        <ctrl:PclLoading x:Name="LoadLaunching" Height="46" Margin="0,4,0,2" />
+        <TextBlock x:Name="LabLaunchingTitle" Text="正在启动游戏" Margin="15,8,15,0" HorizontalAlignment="Center"
+                   FontSize="20" Foreground="{StaticResource ColorBrush3}">
+          <TextBlock.RenderTransform>
+            <SkewTransform AngleX="-3" />
+          </TextBlock.RenderTransform>
+        </TextBlock>
+        <TextBlock x:Name="LabLaunchingName" Text="" Margin="40,5,40,0" FontSize="13.5" HorizontalAlignment="Center"
+                   Foreground="{StaticResource ColorBrush3}" TextTrimming="CharacterEllipsis">
+          <TextBlock.RenderTransform>
+            <SkewTransform AngleX="-3" />
+          </TextBlock.RenderTransform>
+        </TextBlock>
+
+        <!-- 进度条：两列按进度分配宽度 -->
+        <Grid x:Name="PanProgressBar" Height="4" Margin="30,12,30,24">
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="0*" />
+            <ColumnDefinition Width="1*" />
+          </Grid.ColumnDefinitions>
+          <Rectangle Grid.Column="0">
+            <Rectangle.Fill>
+              <LinearGradientBrush StartPoint="0%,0%" EndPoint="100%,0%">
+                <GradientStop Color="#4890f5" Offset="0" />
+                <GradientStop Color="#1370f3" Offset="0.6" />
+              </LinearGradientBrush>
+            </Rectangle.Fill>
+          </Rectangle>
+          <Rectangle Grid.Column="1" Fill="{StaticResource ColorBrush6}" Opacity="0.6" />
         </Grid>
-        <TextBlock x:Name="LabStage" HorizontalAlignment="Center" FontSize="12" Margin="0,14,0,0"
-                   Foreground="{StaticResource ColorBrushGray2}" TextWrapping="Wrap"
-                   TextAlignment="Center" MaxWidth="250" Text="正在启动" />
+
+        <Grid x:Name="PanLaunchingInfo" HorizontalAlignment="Center">
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="Auto" />
+            <ColumnDefinition Width="15" />
+            <ColumnDefinition Width="Auto" />
+          </Grid.ColumnDefinitions>
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+          </Grid.RowDefinitions>
+          <TextBlock FontSize="12.5" Margin="0,0,0,5" Text="当前步骤" Grid.Row="0" Grid.Column="0" HorizontalAlignment="Right" Opacity="0.5" />
+          <TextBlock x:Name="LabLaunchingStage" FontSize="12.5" Margin="0,0,0,5" Text="初始化" Grid.Row="0" Grid.Column="2" HorizontalAlignment="Left" />
+          <TextBlock FontSize="12.5" Margin="0,0,0,5" Text="登录方式" Grid.Row="1" Grid.Column="0" HorizontalAlignment="Right" Opacity="0.5" />
+          <TextBlock x:Name="LabLaunchingMethod" FontSize="12.5" Margin="0,0,0,5" Text="离线登录" Grid.Row="1" Grid.Column="2" HorizontalAlignment="Left" />
+          <TextBlock x:Name="LabLaunchingProgressLeft" FontSize="12.5" Margin="0,0,0,5" Text="启动进度" Grid.Row="2" Grid.Column="0" HorizontalAlignment="Right" Opacity="0.5" />
+          <TextBlock x:Name="LabLaunchingProgress" FontSize="12.5" Margin="0,0,0,5" Text="0.00 %" Grid.Row="2" Grid.Column="2" HorizontalAlignment="Left" />
+          <TextBlock x:Name="LabLaunchingDownloadLeft" FontSize="12.5" Margin="0,0,0,5" Text="下载速度" Grid.Row="3" Grid.Column="0"
+                     HorizontalAlignment="Right" Opacity="0" IsVisible="False" />
+          <TextBlock x:Name="LabLaunchingDownload" FontSize="12.5" Margin="0,0,0,5" Text="0 B/s" Grid.Row="3" Grid.Column="2"
+                     HorizontalAlignment="Left" Opacity="0" IsVisible="False" />
+
+          <!-- 你知道吗：与启动进度行同区域，启动完成后进度行淡出、这里淡入（对应 PanLaunchingHint） -->
+          <Grid x:Name="PanLaunchingHint" HorizontalAlignment="Center" Grid.Row="2" Grid.ColumnSpan="3"
+                Grid.RowSpan="2" Width="260" Margin="0,16,0,2" IsVisible="False" Opacity="0">
+            <Border Margin="0,8,0,0" BorderThickness="1" CornerRadius="3" BorderBrush="{StaticResource ColorBrushGray1}" Opacity="0.5" />
+            <TextBlock FontSize="12.5" Text="你知道吗" HorizontalAlignment="Center" VerticalAlignment="Top"
+                       Foreground="{StaticResource ColorBrushGray1}" Opacity="0.5" Margin="0,-8,0,0" />
+            <TextBlock x:Name="LabLaunchingHint" FontSize="12.5" Text=""
+                       Margin="11,21,11,10" TextWrapping="Wrap" HorizontalAlignment="Center" />
+          </Grid>
+        </Grid>
       </StackPanel>
-      <ctrl:PclButton x:Name="BtnCancelLaunch" Text="取消启动" Height="32" Margin="20,0"
+
+      <ctrl:PclButton x:Name="BtnCancelLaunch" Grid.Row="3" Text="取消" Height="35" Margin="20,0,20,20"
                       VerticalAlignment="Bottom" />
     </Grid>
   </Grid>

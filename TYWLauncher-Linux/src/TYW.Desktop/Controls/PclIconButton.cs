@@ -33,7 +33,13 @@ public class PclIconButton : Border
 
         PointerEntered += (_, _) => { _hover = true; Refresh(); };
         PointerExited += (_, _) => { _hover = false; Refresh(); };
-        PointerReleased += (_, _) => Click?.Invoke(this, System.EventArgs.Empty);
+        // 同 PclNavButton：吃掉指针事件，否则标题栏拖动会把点击吞掉
+        PointerPressed += (_, e) => { e.Handled = true; };
+        PointerReleased += (_, e) =>
+        {
+            e.Handled = true;
+            if (new Rect(Bounds.Size).Contains(e.GetPosition(this))) Click?.Invoke(this, System.EventArgs.Empty);
+        };
     }
 
     public Geometry? Logo

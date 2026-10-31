@@ -7,6 +7,8 @@ using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Threading;
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using TYW.Desktop.Controls;
 using TYW;
@@ -21,16 +23,21 @@ public partial class PageLaunchLeft : UserControl
     private bool _init;
 
     /// <summary>离线页的玩家名输入框（对应 PageLoginLegacy 的 ComboName）。</summary>
-    private ComboBox? _comboName;
+    private PclComboBox? _comboName;
+    /// <summary>名字不合规时的红色提示（对应 PageLoginLegacy 的 HintChinese）。</summary>
+    private PclHint? _hintName;
+
+    private PclSkin? _skinMs;
+    private PclSkin? _skinLegacy;
 
     private bool _launching;
     private volatile bool _cancelRequested;
-    private double _progress;
+    private System.Diagnostics.Process? _proc;
+    private double _shownProgress;
 
     /// <summary>微软登录的取消标志（登录线程读取）。</summary>
     private volatile bool _msCancel;
     /// <summary>用户主动要求改用配对码。</summary>
-    private volatile bool _msForceDevice;
     private bool _msLoggingIn;
 
     public PageLaunchLeft()
@@ -40,8 +47,14 @@ public partial class PageLaunchLeft : UserControl
         RadioLoginType5.Click += (_, _) => SetLoginType(5);
         RadioLoginType0.Click += (_, _) => SetLoginType(0);
         BtnLaunch.Click += (_, _) => _ = OnLaunchClick();
-        BtnVersion.Click += (_, _) => _main?.SwitchPage(1);
-        BtnCancelLaunch.Click += (_, _) => _cancelRequested = true;
+        BtnVersion.Click += async (_, _) =>
+        {
+            var owner = TopLevel.GetTopLevel(this) as Window;
+            if (owner == null) return;
+            var win = new InstanceWindow(() => Build());
+            await win.ShowDialog(owner);
+        };
+        BtnCancelLaunch.Click += (_, _) => OnCancelLaunch();
 
         Loaded += (_, _) => Build();
     }
@@ -61,6 +74,13 @@ public partial class PageLaunchLeft : UserControl
         BuildLoginArea();
         RefreshVersion();
         TryRefreshMsToken();
+    }
+
+    /// <summary>重新扫描版本（下载页装完新版本后回到启动页会调用）。</summary>
+    public void ReloadVersions()
+    {
+        ModVersion.Invalidate();
+        RefreshVersion();
     }
 
     /// <summary>上次登录的令牌过期了就静默续期，避免进游戏时才报错。</summary>
@@ -104,19 +124,19 @@ public partial class PageLaunchLeft : UserControl
         if (_init) BuildLoginArea();
     }
 
+    /// <summary>对应 Windows 版 RefreshButtonsUI：没有版本时按钮变成「下载游戏」。</summary>
     private void RefreshVersion()
     {
-        var list = ModVersion.ListVersions();
         _selected = ModVersion.SelectedOrDefault();
         if (_selected is null)
         {
-            LabVersion.Text = "未找到任何版本，请先在下载页安装";
-            BtnLaunch.Text = "开始游戏";
-            BtnLaunch.IsEnabledButton = false;
+            LabVersion.Text = "未找到可用的游戏版本";
+            BtnLaunch.Text = "下载游戏";
+            BtnLaunch.IsEnabledButton = true;
             return;
         }
         LabVersion.Text = _selected.Id;
-        BtnLaunch.Text = "开始游戏";
+        BtnLaunch.Text = "启动游戏";
         BtnLaunch.IsEnabledButton = true;
     }
 
@@ -127,6 +147,9 @@ public partial class PageLaunchLeft : UserControl
         PanLogin.Children.Clear();
         PanTypeOne.IsVisible = false;
         PanType.IsVisible = true;
+        _comboName = null;
+        _hintName = null;
+
         if (RadioLoginType5.NavChecked)
         {
             // 已经登录过就直接显示账号
@@ -135,12 +158,22 @@ public partial class PageLaunchLeft : UserControl
                 ShowLoggedIn();
                 return;
             }
-            PanLogin.Children.Add(BuildMsPage());
+            SwapLogin(BuildMsPage());
         }
         else
         {
-            PanLogin.Children.Add(BuildLegacyPage());
+            SwapLogin(BuildLegacyPage());
         }
+    }
+
+    /// <summary>登录区内容替换（对应 Windows 版登录方式切换的 TriggerShowAnimation）。</summary>
+    private void SwapLogin(Control content)
+    {
+        PageAnim.SwapLeft(PanLogin, () =>
+        {
+            PanLogin.Children.Clear();
+            PanLogin.Children.Add(content);
+        });
     }
 
     /// <summary>
@@ -174,7 +207,12 @@ public partial class PageLaunchLeft : UserControl
         Grid.SetColumnSpan(icon, 2);
         g.Children.Add(icon);
 
-        var combo = MakeComboBox(false, "");
+        var combo = new PclComboBox
+        {
+            IsEditable = false,
+            Placeholder = "点击右侧按钮登录",
+            HorizontalAlignment = HorizontalAlignment.Stretch
+        };
         Grid.SetRow(combo, 2);
         g.Children.Add(combo);
 
@@ -183,6 +221,7 @@ public partial class PageLaunchLeft : UserControl
             Text = "登录",
             ColorType = PclButton.ColorState.Highlight,
             Width = 60,
+            Height = 28,
             Margin = new Thickness(10, 0, 0, 0)
         };
         btn.Click += (_, _) => StartMsLogin();
@@ -210,38 +249,35 @@ public partial class PageLaunchLeft : UserControl
     // ===================== 微软登录 =====================
 
     /// <summary>
-    /// 优先用系统浏览器做标准登录（本地回环接收回调，登录完自动回来）；
-    /// 浏览器不可用或用户要求时，改用配对码流程（与 Windows 版一致）。
+    /// 只使用配对码登录（与 Windows 版一致）：申请配对码 → 复制到剪贴板 → 打开浏览器 → 轮询等待。
     /// </summary>
     private void StartMsLogin()
     {
         if (_msLoggingIn) return;
         _msLoggingIn = true;
         _msCancel = false;
-        _msForceDevice = false;
 
         var stack = new StackPanel { Spacing = 6, VerticalAlignment = VerticalAlignment.Center };
 
-        var title = Pcl.Text("正在打开浏览器…", 12.5, "ColorBrush1");
+        var title = Pcl.Text("请在浏览器中输入配对码", 12.5, "ColorBrush1");
         title.HorizontalAlignment = HorizontalAlignment.Center;
         stack.Children.Add(title);
 
         var codeBlock = new TextBlock
         {
-            Text = "",
+            Text = "· · · · · ·",
             FontSize = 26,
             FontWeight = FontWeight.Bold,
             FontFamily = Pcl.FontFamily,
             Foreground = Pcl.Res("ColorBrush1"),
             HorizontalAlignment = HorizontalAlignment.Center,
-            Margin = new Thickness(0, 2, 0, 2),
-            IsVisible = false
+            Margin = new Thickness(0, 2, 0, 2)
         };
         stack.Children.Add(codeBlock);
 
         var tip = new TextBlock
         {
-            Text = "请在浏览器里登录微软账号，完成后会自动回到启动器。",
+            Text = "正在申请配对码…",
             FontSize = 11.5,
             FontFamily = Pcl.FontFamily,
             Foreground = Pcl.Res("ColorBrushGray2"),
@@ -259,27 +295,18 @@ public partial class PageLaunchLeft : UserControl
             Spacing = 8,
             Margin = new Thickness(0, 8, 0, 0)
         };
-        var btnDevice = new PclButton { Text = "改用配对码", Height = 28, Width = 96 };
-        var btnOpen = new PclButton { Text = "重新打开", Height = 28, Width = 84 };
+        var btnOpen = new PclButton { Text = "重新打开", Height = 28, Width = 84, IsVisible = false };
         var btnCancel = new PclButton { Text = "取消", Height = 28, Width = 60 };
-        buttons.Children.Add(btnDevice);
         buttons.Children.Add(btnOpen);
         buttons.Children.Add(btnCancel);
         stack.Children.Add(buttons);
 
-        PanLogin.Children.Clear();
-        PanLogin.Children.Add(stack);
+        SwapLogin(stack);
 
         string deviceUrl = null;
         btnOpen.Click += (_, _) =>
         {
             if (!string.IsNullOrEmpty(deviceUrl)) OpenInBrowser(deviceUrl);
-        };
-        btnOpen.IsVisible = false;
-        btnDevice.Click += (_, _) =>
-        {
-            _msForceDevice = true;
-            tip.Text = "正在申请配对码…";
         };
         btnCancel.Click += (_, _) =>
         {
@@ -291,37 +318,19 @@ public partial class PageLaunchLeft : UserControl
         {
             try
             {
-                // 第一选择：浏览器授权码 + 本地回调
-                var acc = ModMsLogin.LoginWithBrowser(
-                    url => Dispatcher.UIThread.Post(() => OpenInBrowser(url)),
-                    () => _msCancel || _msForceDevice,
-                    s => Dispatcher.UIThread.Post(() => { if (!_msForceDevice) tip.Text = s; }));
-
-                // 回退：配对码
-                if (acc == null && !_msCancel)
-                {
-                    Dispatcher.UIThread.Post(() =>
+                var acc = ModMsLogin.Login(
+                    dc => Dispatcher.UIThread.Post(() =>
                     {
-                        title.Text = "请在浏览器中输入配对码";
-                        codeBlock.IsVisible = true;
-                        codeBlock.Text = "· · · · · ·";
-                        tip.Text = "正在申请配对码…";
-                        btnDevice.IsVisible = false;
+                        codeBlock.Text = dc.UserCode;
+                        deviceUrl = dc.VerificationUri;
+                        // 配对码自动进剪贴板，用户直接粘贴即可
+                        CopyText(dc.UserCode);
+                        tip.Text = "配对码已复制到剪贴板，浏览器即将打开 microsoft.com/link，粘贴登录即可。";
                         btnOpen.IsVisible = true;
-                    });
-
-                    acc = ModMsLogin.Login(
-                        dc => Dispatcher.UIThread.Post(() =>
-                        {
-                            codeBlock.Text = dc.UserCode;
-                            deviceUrl = dc.VerificationUri;
-                            tip.Text = "配对码已复制到剪贴板。浏览器没自动打开的话，点「重新打开」。";
-                            OpenInBrowser(dc.VerificationUri);
-                            CopyText(dc.UserCode);
-                        }),
-                        () => _msCancel,
-                        s => Dispatcher.UIThread.Post(() => tip.Text = s));
-                }
+                        OpenInBrowser(dc.VerificationUri);
+                    }),
+                    () => _msCancel,
+                    s => Dispatcher.UIThread.Post(() => tip.Text = s));
 
                 if (acc != null)
                 {
@@ -352,7 +361,6 @@ public partial class PageLaunchLeft : UserControl
                     _msLoggingIn = false;
                     tip.Text = ex.Message;
                     tip.Foreground = Pcl.Res("ColorBrushRed") as IBrush ?? tip.Foreground;
-                    btnDevice.IsVisible = true;
                 });
             }
         });
@@ -381,7 +389,10 @@ public partial class PageLaunchLeft : UserControl
         try { PathTypeOne.Data = Geometry.Parse(LogoIcon.Person); } catch { }
 
         var stack = new StackPanel { Spacing = 8, VerticalAlignment = VerticalAlignment.Center };
-        stack.Children.Add(MakeSkin());
+        var skin = new PclSkin { HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 0, 0, 4) };
+        _skinMs = skin;
+        stack.Children.Add(skin);
+        TryApplySkin(skin, ModSettings.GetString("MsUuid", ""), byName: false);
 
         var name = Pcl.Text(ModSettings.GetString("MsName", "玩家"), 13, "ColorBrush1");
         name.HorizontalAlignment = HorizontalAlignment.Center;
@@ -405,8 +416,7 @@ public partial class PageLaunchLeft : UserControl
         };
         stack.Children.Add(btnOut);
 
-        PanLogin.Children.Clear();
-        PanLogin.Children.Add(stack);
+        SwapLogin(stack);
     }
 
     /// <summary>用系统默认浏览器打开网页（Linux 走 xdg-open）。</summary>
@@ -455,104 +465,97 @@ public partial class PageLaunchLeft : UserControl
 
     /// <summary>
     /// 对应 Pages/PageLaunch/PageLoginLegacy.xaml（离线）：
-    ///   ├ MyHint（红色，仅在名字非法时显示）
-    ///   ├ 皮肤预览 64×64
-    ///   └ 可输入的下拉框 Height 28，占位文字「游戏用户名」
+    /// StackPanel Margin 0,0,0,5 → 红色提示（仅名字非法时显示）→ 头像 → 用户名输入框。
     /// </summary>
     private Control BuildLegacyPage()
     {
         var stack = new StackPanel { Margin = new Thickness(0, 0, 0, 5) };
 
-        var hint = new PclHint
+        _hintName = new PclHint
         {
-            Text = "玩家名如果包含英文、数字、下划线以外的内容，可能会无法进入 Minecraft 1.18 以后的世界！",
+            Theme = "Red",
+            Text = "玩家名不能包含中文等非英文字符，否则进不去 Minecraft 1.18 及以后版本的世界！",
             IsVisible = false,
             Margin = new Thickness(0, 0, 0, 15)
         };
-        stack.Children.Add(hint);
+        stack.Children.Add(_hintName);
 
-        stack.Children.Add(MakeSkin());
-
-        _comboName = MakeComboBox(true, "游戏用户名");
-        _comboName.Text = ModSettings.GetString("OfflineName", ModSettings.GetString("PlayerName", ""));
-        _comboName.PropertyChanged += (_, e) =>
+        var skin = new PclSkin
         {
-            if (e.Property != ComboBox.TextProperty) return;
-            var name = (_comboName.Text ?? "").Trim();
-            hint.IsVisible = name.Length > 0 && !McOffline.IsValidName(name);
+            HorizontalAlignment = HorizontalAlignment.Center,
+            Margin = new Thickness(0, 0, 0, 15)
         };
+        _skinLegacy = skin;
+        stack.Children.Add(skin);
+
+        _comboName = new PclComboBox
+        {
+            IsEditable = true,
+            Placeholder = "游戏用户名",
+            HorizontalAlignment = HorizontalAlignment.Stretch
+        };
+        var history = OfflineNameHistory();
+        if (history.Count > 0) _comboName.SetItems(history);
+        _comboName.Text = ModSettings.GetString("OfflineName", ModSettings.GetString("PlayerName", ""));
+        _comboName.TextChanged += (_, _) =>
+        {
+            var name = (_comboName.Text ?? "").Trim();
+            if (_hintName != null) _hintName.IsVisible = name.Length > 0 && !McOffline.IsValidName(name);
+            // 对应 Windows 版：输入合法名字后自动拉取该玩家的皮肤正脸
+            if (McOffline.IsValidName(name) && name != _skinNameFetched)
+            {
+                _skinNameFetched = name;
+                TryApplySkin(skin, name, byName: true);
+            }
+        };
+        // 初始也拉一次
+        var initName = ModSettings.GetString("OfflineName", ModSettings.GetString("PlayerName", ""));
+        if (McOffline.IsValidName(initName))
+        {
+            _skinNameFetched = initName;
+            TryApplySkin(skin, initName, byName: true);
+        }
         stack.Children.Add(_comboName);
 
         return stack;
     }
 
-    /// <summary>64×64 皮肤预览（对应 MySkin：SameSize、圆角、半透明底）。</summary>
-    private static Control MakeSkin()
+    private static List<string> OfflineNameHistory()
     {
-        var host = new Border
-        {
-            Width = 64,
-            Height = 64,
-            CornerRadius = new CornerRadius(6),
-            Background = Pcl.Res("ColorBrushSemiTransparent"),
-            HorizontalAlignment = HorizontalAlignment.Center,
-            Margin = new Thickness(0, 0, 0, 15),
-            ClipToBounds = true
-        };
+        var raw = ModSettings.GetString("OfflineNameHistory", "");
+        return raw.Split(new[] { '\n' }, StringSplitOptions.RemoveEmptyEntries)
+                  .Select(s => s.Trim())
+                  .Where(s => s.Length > 0)
+                  .Distinct()
+                  .Take(10)
+                  .ToList();
+    }
 
-        var canvas = new Canvas { Width = 64, Height = 64 };
-        void Rect(double x, double y, double w, double h, string hex)
+    private static void RememberOfflineName(string name)
+    {
+        var list = OfflineNameHistory();
+        list.Remove(name);
+        list.Insert(0, name);
+        ModSettings.SetValue("OfflineNameHistory", string.Join("\n", list.Take(10)));
+    }
+
+    /// <summary>拉取玩家皮肤并应用到头像（后台线程，失败保持默认 Steve 脸）。</summary>
+    private void TryApplySkin(PclSkin skin, string key, bool byName)
+    {
+        if (string.IsNullOrWhiteSpace(key)) return;
+        Task.Run(() =>
         {
-            canvas.Children.Add(new Rectangle
+            var path = byName ? ModSkin.FetchByName(key) : ModSkin.FetchByUuid(key);
+            if (path.Length == 0) return;
+            Dispatcher.UIThread.Post(() =>
             {
-                Width = w,
-                Height = h,
-                Fill = new SolidColorBrush(Color.Parse(hex)),
-                [Canvas.LeftProperty] = x,
-                [Canvas.TopProperty] = y
+                // 页面可能已经切换，只应用到还活着的头像
+                if (skin == _skinMs || skin == _skinLegacy) skin.ApplyFile(path);
             });
-        }
-        // 正面 2D 皮肤：头 / 身体 / 手臂 / 腿（近似原版 Steve 配色）
-        Rect(22, 6, 20, 18, "#C69C6D");   // 头
-        Rect(22, 6, 20, 6, "#3F2A1C");    // 头发
-        Rect(26, 15, 4, 4, "#FFFFFF");    // 左眼
-        Rect(34, 15, 4, 4, "#FFFFFF");
-        Rect(27, 16, 2, 3, "#5A3CA8");    // 瞳孔
-        Rect(35, 16, 2, 3, "#5A3CA8");
-        Rect(26, 22, 12, 2, "#A87C52");   // 嘴部阴影
-        Rect(24, 25, 16, 22, "#00A8A8");  // 上衣
-        Rect(18, 25, 6, 20, "#C69C6D");   // 左臂
-        Rect(40, 25, 6, 20, "#C69C6D");   // 右臂
-        Rect(24, 47, 7, 12, "#4B4BB0");   // 左腿
-        Rect(33, 47, 7, 12, "#4B4BB0");
-        Rect(24, 57, 7, 3, "#4A4A4A");    // 鞋
-        Rect(33, 57, 7, 3, "#4A4A4A");
-
-        host.Child = canvas;
-        return host;
+        });
     }
 
-    /// <summary>对应 MyComboBox：白底、Gray5 边框、圆角 3、高度 28。</summary>
-    private static ComboBox MakeComboBox(bool editable, string placeholder)
-    {
-        return new ComboBox
-        {
-            Height = 28,
-            MinHeight = 28,
-            FontSize = 12.5,
-            FontFamily = Pcl.FontFamily,
-            Background = Pcl.Res("ColorBrushWhite"),
-            BorderBrush = Pcl.Res("ColorBrushGray5"),
-            BorderThickness = new Thickness(1),
-            CornerRadius = new CornerRadius(3),
-            Padding = new Thickness(10, 0, 8, 0),
-            VerticalContentAlignment = VerticalAlignment.Center,
-            IsEditable = editable,
-            PlaceholderText = placeholder,
-            PlaceholderForeground = Pcl.Res("ColorBrushGray4"),
-            Foreground = Pcl.Res("ColorBrushGray1")
-        };
-    }
+    private string? _skinNameFetched;
 
     /// <summary>对应 MyTextButton：文字按钮，点击打开网页。</summary>
     private static Control MakeLink(string text, string url)
@@ -586,18 +589,19 @@ public partial class PageLaunchLeft : UserControl
         if (_launching) return;
         if (_selected is null)
         {
-            _right?.ShowHint("还没有安装任何版本，请先在下载页安装一个版本。");
+            // 对应 Windows 版：按钮显示「下载游戏」时点它跳到下载页
+            _main?.SwitchPage(1);
             return;
         }
 
-        // 离线：把玩家名落盘（对应 Windows 版 Legacy 登录的用户名缓存）
         string playerName;
         if (!RadioLoginType5.NavChecked)
         {
             playerName = (_comboName?.Text ?? "").Trim();
-            if (playerName.Length == 0 || !McOffline.IsValidName(playerName))
+            if (!McOffline.IsValidName(playerName))
             {
-                _right?.ShowHint("请输入合法的游戏用户名（3-16 位，仅英文、数字、下划线）。");
+                if (_hintName != null) _hintName.IsVisible = true;
+                _right?.ShowHint("游戏用户名只能使用英文、数字和下划线，长度 3-16 位。");
                 return;
             }
             ModSettings.SetValue("OfflineName", playerName);
@@ -615,7 +619,6 @@ public partial class PageLaunchLeft : UserControl
 
         ModSettings.SetValue("VersionSelect", _selected.Id);
         ModSettings.Save();
-        ModLog.Info("准备启动 " + _selected.Id);
 
         var opt = new LaunchOptions
         {
@@ -623,145 +626,288 @@ public partial class PageLaunchLeft : UserControl
             PlayerName = playerName,
             Uuid = RadioLoginType5.NavChecked
                     ? ModSettings.GetString("MsUuid", "")
-                    : ModSettings.GetString("OfflineUuid", McOffline.UuidOf(playerName)),
+                    : McOffline.UuidOf(playerName),
             AccessToken = RadioLoginType5.NavChecked
                     ? ModSettings.GetString("MsToken", "0")
                     : "0",
             UserType = RadioLoginType5.NavChecked ? "msa" : "legacy",
             JavaPath = ModSettings.GetString("LaunchJavaExe", ""),
             MaxRamMb = ModSettings.GetInt("LaunchRam", 2048),
-            GameDir = ModPaths.McFolder
+            GameDir = ModVersion.GameDirOf(_selected),
+            WindowWidth = ModSettings.GetInt("LaunchWindowWidth", 854),
+            WindowHeight = ModSettings.GetInt("LaunchWindowHeight", 480),
+            Fullscreen = ModSettings.GetBool("LaunchFullscreen", false),
+            JvmExtra = ModSettings.GetString("LaunchJvmExtra", "")
         };
 
         _launching = true;
         _cancelRequested = false;
-        _progress = 0;
-        SetProgress(0, "正在启动");
+        PrepareLaunching();
         await EnterLaunching();
 
         try
         {
-            var proc = await Task.Run(() => ModLaunch.Launch(opt, (stage, prog) =>
+            var proc = await Task.Run(() => ModLaunch.Launch(opt, (stage, p) =>
             {
                 if (_cancelRequested) throw new OperationCanceledException();
-                Dispatcher.UIThread.Post(() => SetProgress(prog, stage));
+                Dispatcher.UIThread.Post(() => SetProgress(p, stage));
             }));
 
-            SetProgress(1, "启动成功，祝游戏愉快");
-            await Task.Delay(900);
+            _proc = proc;
+            _main?.SetGameRunning(proc);
+            if (!RadioLoginType5.NavChecked) RememberOfflineName(playerName);
+            ModLog.Info("已启动游戏：" + _selected.Id);
+
+            FinishLaunching();
+            await Task.Delay(Ani.Slow > 1 ? 500 : 900);
             await ExitLaunching();
         }
         catch (OperationCanceledException)
         {
-            SetProgress(_progress, "已取消启动");
-            await Task.Delay(700);
+            LabLaunchingTitle.Text = "已取消启动";
+            SetProgress(_shownProgress, "已取消");
+            await Task.Delay(600);
             await ExitLaunching();
         }
         catch (Exception ex)
         {
             ModLog.Err(ex, "启动失败");
-            SetProgressError(ex.Message);
-            await Task.Delay(4000);
+            LabLaunchingTitle.Text = "启动失败";
+            LabLaunchingTitle.Foreground = Pcl.Res("ColorBrushRedDark");
+            LabLaunchingStage.Text = ex.Message;
+            LabLaunchingStage.Foreground = Pcl.Res("ColorBrushRedDark");
+            await Task.Delay(3500);
             await ExitLaunching();
         }
         finally
         {
             _launching = false;
+            _proc = null;
         }
     }
 
-    /// <summary>进入启动中：PanInput 淡出缩小，PanLaunching 上移淡入。</summary>
+    private void OnCancelLaunch()
+    {
+        if (!_launching) return;
+        _cancelRequested = true;
+        LabLaunchingTitle.Text = "正在取消…";
+        LabLaunchingStage.Text = "等待当前步骤结束";
+        try
+        {
+            if (_proc != null && !_proc.HasExited) _proc.Kill(true);
+        }
+        catch (Exception ex)
+        {
+            ModLog.Err(ex, "取消启动");
+        }
+    }
+
+    /// <summary>对应 PageChangeToLaunching：初始化启动页的各项文字与进度。</summary>
+    private void PrepareLaunching()
+    {
+        LabLaunchingTitle.Text = "正在启动游戏";
+        LabLaunchingTitle.Foreground = Pcl.Res("ColorBrush3");
+        LabLaunchingName.Text = _selected?.Id ?? "";
+        LabLaunchingStage.Text = "初始化";
+        LabLaunchingStage.Foreground = Pcl.Res("ColorBrush1");
+        LabLaunchingMethod.Text = RadioLoginType5.NavChecked ? "正版登录" : "离线登录";
+        LabLaunchingProgress.Text = "0.00 %";
+        BtnCancelLaunch.IsVisible = true;
+        _shownProgress = 0;
+        SetBar(0);
+
+        // 重置启动进度行 / 下载速度行 / 你知道吗（对应 PrepareLaunching 的重置段）
+        LabLaunchingProgressLeft.Opacity = 0.5;
+        LabLaunchingProgressLeft.IsVisible = true;
+        LabLaunchingProgress.Opacity = 1;
+        LabLaunchingProgress.IsVisible = true;
+        LabLaunchingDownloadLeft.IsVisible = false;
+        LabLaunchingDownloadLeft.Opacity = 0;
+        LabLaunchingDownload.IsVisible = false;
+        LabLaunchingDownload.Opacity = 0;
+        LabLaunchingDownload.Text = "0 B/s";
+        PanLaunchingHint.IsVisible = false;
+        PanLaunchingHint.Opacity = 0;
+        LabLaunchingHint.Text = RandomHint();
+
+        // 每 0.2s 刷新下载速度（对应 LaunchingRefresh 的 0.1s，这里放宽到 0.2s）
+        _launchTick ??= new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(200) };
+        _launchTick.Tick -= LaunchTick;
+        _launchTick.Tick += LaunchTick;
+        _launchTick.Start();
+    }
+
+    private DispatcherTimer? _launchTick;
+    private bool _speedShown;
+
+    private void LaunchTick(object? sender, EventArgs e)
+    {
+        long speed = ModDownload.Speed();
+        bool has = speed > 512; // 低于 0.5K/s 视为没在下载（可能只在校验文件）
+        if (has == _speedShown) { if (has) LabLaunchingDownload.Text = ModDownload.FormatSpeed(speed); return; }
+        _speedShown = has;
+        LabLaunchingDownloadLeft.IsVisible = true;
+        LabLaunchingDownload.IsVisible = true;
+        LabLaunchingDownload.Text = ModDownload.FormatSpeed(speed);
+        _ = Ani.Tween(LabLaunchingDownloadLeft.Opacity, has ? 0.5 : 0, 90, v => LabLaunchingDownloadLeft.Opacity = v);
+        _ = Ani.Tween(LabLaunchingDownload.Opacity, has ? 1 : 0, 90, v =>
+        {
+            LabLaunchingDownload.Opacity = v;
+            if (v == 0 && !has)
+            {
+                LabLaunchingDownloadLeft.IsVisible = false;
+                LabLaunchingDownload.IsVisible = false;
+            }
+        });
+    }
+
+    /// <summary>「你知道吗」随机提示（对应 PageOtherTest.GetRandomHint）。</summary>
+    private static string RandomHint()
+    {
+        string[] hints =
+        {
+            "按 F3 可以打开调试界面，查看坐标、帧数和区块信息。",
+            "按 F5 可以切换第三人称视角。",
+            "潜行（Shift）时不会被方块边缘挤下去。",
+            "用剪刀可以无损收集树叶和蛛网。",
+            "下雨时露天钓鱼效率更高。",
+            "僵尸在阳光下会着火，但戴着头盔就不会。",
+            "把水放在方块边缘不会流出来，可以用来做装饰。",
+            "铁傀儡会主动保护村庄里的村民。",
+            "在铁砧上重命名物品是附魔经验之外唯一不耗等级的操作。",
+            "末影人会避开水和雨，还会被盯着看而激怒。",
+            "使用「/gamerule keepInventory true」死亡后不掉落物品。",
+            "猫会送礼物给早晨醒来的主人。",
+            "地图上插旗帜可以标记位置。",
+            "骨头粉可以催熟作物，也能催出鲜花。",
+            "船在冰上滑得飞快，可以做冰道高速交通。"
+        };
+        return hints[System.Random.Shared.Next(hints.Length)];
+    }
+
+    private void FinishLaunching()
+    {
+        LabLaunchingTitle.Text = "已启动游戏";
+        SetProgress(1, "已完成");
+        BtnCancelLaunch.IsVisible = false;
+
+        // 启动进度行淡出，「你知道吗」淡入（对应 LaunchingRefresh 的 IsLaunched 分支）
+        _launchTick?.Stop();
+        if (_speedShown)
+        {
+            _speedShown = false;
+            LabLaunchingDownloadLeft.IsVisible = false;
+            LabLaunchingDownload.IsVisible = false;
+            LabLaunchingDownloadLeft.Opacity = 0;
+            LabLaunchingDownload.Opacity = 0;
+        }
+        LabLaunchingProgressLeft.IsVisible = true;
+        LabLaunchingProgress.IsVisible = true;
+        PanLaunchingHint.IsVisible = true;
+        _ = Ani.Tween(LabLaunchingProgressLeft.Opacity, 0, 90, v =>
+        {
+            LabLaunchingProgressLeft.Opacity = v;
+            if (v == 0) LabLaunchingProgressLeft.IsVisible = false;
+        });
+        _ = Ani.Tween(LabLaunchingProgress.Opacity, 0, 90, v =>
+        {
+            LabLaunchingProgress.Opacity = v;
+            if (v == 0) LabLaunchingProgress.IsVisible = false;
+        });
+        _ = Ani.Tween(0, 1, 90, v => PanLaunchingHint.Opacity = v);
+    }
+
     private async Task EnterLaunching()
     {
         PanLaunching.IsVisible = true;
         PanLaunching.Opacity = 0;
-        var tt = (TranslateTransform)PanLaunching.RenderTransform!;
-        tt.Y = 14;
+        PanLaunching.IsHitTestVisible = false;
+        var sc = (ScaleTransform)PanLaunching.RenderTransform!;
+        sc.ScaleX = sc.ScaleY = 0.8;
+        var ps = (ScaleTransform)PanInput.RenderTransform!;
+        ps.ScaleX = ps.ScaleY = 1;
+        PanInput.IsVisible = true;
+        PanInput.IsHitTestVisible = false;
 
-        _ = Ani.Tween(1, 0, 170, v =>
+        if (Environment.GetEnvironmentVariable("TYW_NO_ANIM") == "1")
         {
-            PanInput.Opacity = v;
-            if (PanInput.RenderTransform is ScaleTransform st)
-            {
-                st.ScaleX = 0.97 + 0.03 * v;
-                st.ScaleY = 0.97 + 0.03 * v;
-            }
-        }, Ani.EaseInFluent);
+            PanInput.IsVisible = false;
+            PanLaunching.Opacity = 1;
+            sc.ScaleX = sc.ScaleY = 1;
+            PanLaunching.IsHitTestVisible = true;
+            return;
+        }
 
-        await Ani.Tween(0, 1, 260, v => PanLaunching.Opacity = v, Ani.EaseOutFluent, 90);
-        await Ani.Tween(14, 0, 260, v => tt.Y = v, Ani.EaseOutFluent);
+        // 参数对应 PageChangeToLaunching：
+        //   PanInput  淡出 110ms EaseInFluent + 放大到 1.2（160ms）
+        //   PanLaunch 淡入 150ms（延迟 100）+ 0.8→1（500ms，弱回弹）
+        _ = Ani.Tween(1, 0, 110, v => PanInput.Opacity = v, Ani.EaseInFluent);
+        _ = Ani.Tween(1, 1.2, 160, v => { ps.ScaleX = v; ps.ScaleY = v; }, Ani.EaseOutFluent);
+        _ = Ani.Tween(0, 1, 150, v => PanLaunching.Opacity = v, Ani.EaseOutFluent, 100);
+        _ = Ani.Tween(0.8, 1, 500, v => { sc.ScaleX = v; sc.ScaleY = v; }, Ani.EaseOutBack, 100);
+        await Task.Delay(150 * Ani.Slow);
         PanInput.IsVisible = false;
+        PanLaunching.IsHitTestVisible = true;
     }
 
     private async Task ExitLaunching()
     {
-        var tt = (TranslateTransform)PanLaunching.RenderTransform!;
-        await Ani.Tween(1, 0, 160, v => PanLaunching.Opacity = v, Ani.EaseInFluent);
-        PanLaunching.IsVisible = false;
-
-        PanInput.IsVisible = true;
-        if (PanInput.RenderTransform is ScaleTransform st)
+        _launchTick?.Stop();
+        // 参数对应 PageChangeToLogin：
+        //   PanLaunch 淡出 150ms + 缩回 0.8（150ms）
+        //   PanInput  淡入 250ms（延迟 50）+ 1→1 回弹（300ms，延迟 50）
+        if (Environment.GetEnvironmentVariable("TYW_NO_ANIM") != "1")
         {
-            st.ScaleX = 1;
-            st.ScaleY = 1;
+            PanLaunching.IsHitTestVisible = false;
+            var sc = (ScaleTransform)PanLaunching.RenderTransform!;
+            _ = Ani.Tween(PanLaunching.Opacity, 0, 150, v => PanLaunching.Opacity = v);
+            _ = Ani.Tween(sc.ScaleX, 0.8, 150, v => { sc.ScaleX = v; sc.ScaleY = v; }, Ani.EaseOutFluent);
+            await Task.Delay(50 * Ani.Slow);
+            PanInput.IsVisible = true;
+            PanInput.Opacity = 0;
+            var ps = (ScaleTransform)PanInput.RenderTransform!;
+            _ = Ani.Tween(0, 1, 250, v => PanInput.Opacity = v, null, 50);
+            _ = Ani.Tween(1, 1, 300, v => { ps.ScaleX = v; ps.ScaleY = v; }, Ani.EaseOutBack, 50);
+            await Task.Delay(250 * Ani.Slow);
         }
-        _ = Ani.Tween(0, 1, 220, v => PanInput.Opacity = v);
-        tt.Y = 0;
+        else
+        {
+            PanInput.Opacity = 1;
+        }
+        PanLaunching.IsVisible = false;
+        PanLaunching.IsHitTestVisible = false;
+        PanInput.IsHitTestVisible = true;
+        PanInput.Opacity = 1;
+        if (PanInput.RenderTransform is ScaleTransform st) { st.ScaleX = st.ScaleY = 1; }
     }
 
-    /// <summary>进度环：平滑过渡到目标进度并更新阶段文字。</summary>
+    /// <summary>推进度：柱子按补间走，文字直接跟到目标值。</summary>
     private void SetProgress(double p, string stage)
     {
         p = Math.Clamp(p, 0, 1);
-        LabStage.Text = stage;
-        LabStage.Foreground = Pcl.Res("ColorBrushGray2");
-        var from = _progress;
-        _progress = p;
-        if (Math.Abs(p - from) < 0.005)
+        if (!string.IsNullOrEmpty(stage))
         {
-            DrawRing(p);
+            LabLaunchingStage.Text = stage;
+            LabLaunchingStage.Foreground = Pcl.Res("ColorBrush1");
+        }
+        double from = _shownProgress;
+        _shownProgress = p;
+        if (Math.Abs(p - from) < 0.002)
+        {
+            SetBar(p);
             return;
         }
-        _ = Ani.Tween(from, p, 220, DrawRing, Ani.EaseOutFluent);
-    }
-
-    private void SetProgressError(string message)
-    {
-        LabStage.Text = message;
-        LabStage.Foreground = Pcl.Res("ColorBrushRed") as IBrush ?? Pcl.Res("ColorBrush1");
-        LabPercent.Text = "!";
-        PathProgress.Data = null;
-    }
-
-    private void DrawRing(double p)
-    {
-        LabPercent.Text = ((int)Math.Round(p * 100)) + "%";
-        PathProgress.Data = ArcGeometry(p, 38, 38, 33.5);
-    }
-
-    /// <summary>生成从 12 点方向顺时针扫过 p 圈（0~1）的圆弧。</summary>
-    private static Geometry? ArcGeometry(double p, double cx, double cy, double r)
-    {
-        if (p <= 0.0005) return null;
-        if (p >= 0.9995)
+        _ = Ani.Tween(from, p, 200, v =>
         {
-            return new EllipseGeometry(new Rect(cx - r, cy - r, r * 2, r * 2));
-        }
-        double sweep = p * 360;
-        double a0 = -90 * Math.PI / 180;
-        double a1 = (-90 + sweep) * Math.PI / 180;
-        var start = new Point(cx + r * Math.Cos(a0), cy + r * Math.Sin(a0));
-        var end = new Point(cx + r * Math.Cos(a1), cy + r * Math.Sin(a1));
-        var fig = new PathFigure { StartPoint = start, IsClosed = false, IsFilled = false };
-        fig.Segments.Add(new ArcSegment
-        {
-            Point = end,
-            Size = new Size(r, r),
-            IsLargeArc = sweep > 180,
-            SweepDirection = SweepDirection.Clockwise
-        });
-        var geo = new PathGeometry();
-        geo.Figures.Add(fig);
-        return geo;
+            SetBar(v);
+            LabLaunchingProgress.Text = (v * 100).ToString("0.00") + " %";
+        }, Ani.EaseOutFluent);
+    }
+
+    private void SetBar(double p)
+    {
+        PanProgressBar.ColumnDefinitions[0].Width = new GridLength(Math.Clamp(p, 0, 1), GridUnitType.Star);
+        PanProgressBar.ColumnDefinitions[1].Width = new GridLength(Math.Clamp(1 - p, 0, 1), GridUnitType.Star);
+        LabLaunchingProgress.Text = (p * 100).ToString("0.00") + " %";
     }
 }

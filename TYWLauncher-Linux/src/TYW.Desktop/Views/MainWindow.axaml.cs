@@ -52,11 +52,21 @@ public partial class MainWindow : Window
         BtnTitleClose.Click += (_, _) => Close();
         BtnTitleMin.Click += (_, _) => WindowState = WindowState.Minimized;
 
-        // 无边框窗口靠标题栏拖动
+        // 无边框窗口靠标题栏拖动；点到按钮/输入框时不能拖，否则按钮的点击会被拖拽吞掉
         PanTitle.PointerPressed += (_, e) =>
         {
-            if (e.GetCurrentPoint(this).Properties.IsLeftButtonPressed) BeginMoveDrag(e);
+            if (!e.GetCurrentPoint(this).Properties.IsLeftButtonPressed) return;
+            if (e.Source is Control c && IsInteractive(c)) return;
+            BeginMoveDrag(e);
         };
+
+        // 右下角「关闭 Minecraft」：对应 FormMain 的 BtnExtraShutdown
+        BtnExtraShutdown.Click += (_, _) => CloseGame();
+
+        // 右下角任务按钮：有下载/安装任务时出现，显示进度，点击打开任务管理
+        BtnExtraTask.Click += (_, _) => TaskCenter.ShowWindow(this);
+        TaskCenter.Changed += RefreshTaskButton;
+        RefreshTaskButton();
 
         // 左栏底色宽度跟随左栏实际宽度
         PanMainLeft.SizeChanged += (_, e) => RectLeftBackground.Width = Math.Max(0, e.NewSize.Width);
@@ -65,6 +75,10 @@ public partial class MainWindow : Window
         {
             var navEnv = Environment.GetEnvironmentVariable("TYW_SNAPSHOT_NAV");
             SwitchPage(int.TryParse(navEnv, out var navIdx) ? navIdx : 0);
+
+            // 服务端流程：封禁查询 / 公告 / 云控 / 检查更新 / 补报（对应 Windows 版 ServerLoader）
+            LinkPage.Attach(this);
+            ModStartup.Run(this);
 
             // 先把初态摆好（不可见），等首帧布局/渲染完成后再启动补间，
             // 否则软件渲染下首帧阻塞会让动画在阻塞期间“空转完”，用户看到的是硬切。
@@ -91,12 +105,126 @@ public partial class MainWindow : Window
         await System.Threading.Tasks.Task.WhenAll(t1, t2, t3);
     }
 
+    // ================= 运行中的 Minecraft（对应 ModWatcher + BtnExtraShutdown） =================
+
+    private System.Diagnostics.Process? _game;
+
+    /// <summary>启动页把游戏进程交进来后，右下角就出现「关闭 Minecraft」。</summary>
+    public void SetGameRunning(System.Diagnostics.Process? game)
+    {
+        if (ReferenceEquals(_game, game)) return;
+        _game = game;
+        BtnExtraShutdown.Show = game != null;
+        if (game == null) return;
+        try
+        {
+            game.EnableRaisingEvents = true;
+            game.Exited += (_, _) => Dispatcher.UIThread.Post(() =>
+            {
+                if (ReferenceEquals(_game, game)) SetGameRunning(null);
+            });
+        }
+        catch (Exception ex)
+        {
+            ModLog.Err(ex, "监视游戏进程");
+        }
+    }
+
+    /// <summary>对应 FormMain.BtnExtraShutdown_Click：结束所有运行中的 Minecraft。</summary>
+    private void CloseGame()
+    {
+        var p = _game;
+        SetGameRunning(null);
+        if (p == null) return;
+        try
+        {
+            if (!p.HasExited) p.Kill(true);
+            ModLog.Info("已关闭运行中的 Minecraft");
+        }
+        catch (Exception ex)
+        {
+            ModLog.Err(ex, "关闭 Minecraft");
+        }
+    }
+
+    /// <summary>右下角任务按钮状态：有运行中的任务就显示并跟着进度填充，全部结束后 2 秒收起。</summary>
+    private DispatcherTimer? _taskHideTimer;
+
+    private void RefreshTaskButton()
+    {
+        try
+        {
+            var p = TaskCenter.RunningProgress;
+            if (p >= 0)
+            {
+                _taskHideTimer?.Stop();
+                BtnExtraTask.Show = true;
+                BtnExtraTask.Progress = p;
+                BtnExtraTask.Tip = "任务管理 · " + Math.Round(p * 100) + "%";
+                return;
+            }
+
+            BtnExtraTask.Progress = 1;
+            BtnExtraTask.Tip = "任务管理";
+            if (!BtnExtraTask.IsVisible) return;
+            if (_taskHideTimer == null)
+            {
+                _taskHideTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
+                _taskHideTimer.Tick += (_, _) =>
+                {
+                    _taskHideTimer!.Stop();
+                    if (!TaskCenter.HasRunning) BtnExtraTask.Show = false;
+                };
+            }
+            _taskHideTimer.Stop();
+            _taskHideTimer.Start();
+        }
+        catch (Exception ex)
+        {
+            ModLog.Err(ex, "刷新任务按钮");
+        }
+    }
+
+    /// <summary>指针是不是落在可交互控件上（标题栏拖动的白名单判断）。</summary>
+    private static bool IsInteractive(Control source)
+    {
+        for (Control? v = source; v != null; v = v.Parent as Control)
+        {
+            if (v is PclNavButton or PclIconButton or PclButton or PclComboBox or PclExtraButton) return true;
+            if (v is TextBox) return true;
+            if (v.Name == "PanTitle") return false;
+        }
+        return false;
+    }
+
+    private int _switchGen;
+
     public void SwitchPage(int index)
     {
-        if (_page == index) return;
+        if (_page == index && _pageLeft != null) return;
         _page = index;
         for (int i = 0; i < _nav.Length; i++) _nav[i].NavChecked = i == index;
+        _ = DoSwitch(index, ++_switchGen);
+    }
 
+    /// <summary>
+    /// 对应 FormMain.PageChangeAnim：旧页逐个退出 → 换内容 → 新页逐个进入。
+    /// 旧右页卡片上移淡出（15ms 错开）、旧左栏左移淡出，约 140ms 后换页。
+    /// </summary>
+    private async System.Threading.Tasks.Task DoSwitch(int index, int gen)
+    {
+        // 1) 退出动画（旧页面还在树上，只是整体不可交互）
+        PanMainLeft.IsHitTestVisible = false;
+        PanMainRight.IsHitTestVisible = false;
+        int exitRightMs = PageAnim.ExitRight(_pageRight);
+        PageAnim.ExitLeft(_pageLeft);
+
+        // Windows 版在退出动画播到一半（110ms + 30ms）时就换内容，这里保持同一节奏
+        int wait = Math.Min(Math.Max(140, exitRightMs / 2), 260) * Ani.Slow;
+        await System.Threading.Tasks.Task.Delay(wait);
+        if (gen != _switchGen) return; // 期间又点了别的导航，本次作废
+
+        // 2) 换内容
         Control left;
         Control right;
         if (index == 0)
@@ -118,13 +246,68 @@ public partial class MainWindow : Window
         _pageRight = right;
         PanMainLeft.Child = left;
         PanMainRight.Child = right;
+        PanMainLeft.IsHitTestVisible = true;
+        PanMainRight.IsHitTestVisible = true;
 
+        // 3) 进入动画
         if (Environment.GetEnvironmentVariable("TYW_NO_ANIM") != "1")
         {
-            left.Opacity = 0;
-            right.Opacity = 0;
-            _ = Ani.Tween(0, 1, 200, v => left.Opacity = v, Ani.EaseOutFluent, 60);
-            _ = Ani.Tween(0, 1, 220, v => right.Opacity = v, Ani.EaseOutFluent, 60);
+            PageAnim.EnterLeft(left);
+            PageAnim.EnterRight(right);
+        }
+    }
+
+    // ================= 左下角提示（对应 Windows 版 Hint） =================
+
+    private Border _hintToast;
+    private DispatcherTimer _hintTimer;
+
+    /// <summary>左下角滑出提示条，4 秒后消失。red = 红色警告。</summary>
+    public void ShowHint(string text, bool red)
+    {
+        try
+        {
+            if (_hintToast != null) PanBack.Children.Remove(_hintToast);
+            _hintTimer?.Stop();
+
+            _hintToast = new Border
+            {
+                Background = red ? new SolidColorBrush(Color.Parse("#ffdddf")) : Pcl.Res("ColorBrushBg0"),
+                BorderBrush = red ? new SolidColorBrush(Color.Parse("#99FF4444")) : Pcl.Res("ColorBrush6"),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(4),
+                Padding = new Thickness(12, 7, 12, 7),
+                Opacity = 0,
+                HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Left,
+                VerticalAlignment = Avalonia.Layout.VerticalAlignment.Bottom,
+                Margin = new Thickness(18, 0, 0, 16),
+                MaxWidth = 460,
+                IsHitTestVisible = false,
+                Child = new TextBlock
+                {
+                    Text = text,
+                    FontSize = 12.5,
+                    FontFamily = Pcl.FontFamily,
+                    Foreground = red ? new SolidColorBrush(Color.Parse("#bf0b0b")) : Pcl.Res("ColorBrush1"),
+                    TextWrapping = TextWrapping.Wrap
+                }
+            };
+            PanBack.Children.Add(_hintToast);
+            _ = Ani.Tween(0, 1, 180, v => _hintToast.Opacity = v, Ani.EaseOutFluent);
+
+            _hintTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(4000) };
+            var toast = _hintToast;
+            _hintTimer.Tick += (_, _) =>
+            {
+                _hintTimer.Stop();
+                _ = Ani.Tween(1, 0, 300, v => toast.Opacity = v, Ani.EaseOutFluent)
+                    .ContinueWith(_ => Dispatcher.UIThread.Post(() => PanBack.Children.Remove(toast)));
+            };
+            _hintTimer.Start();
+        }
+        catch (Exception ex)
+        {
+            ModLog.Err(ex, "显示提示");
         }
     }
 
@@ -174,6 +357,36 @@ public partial class MainWindow : Window
             }
             if (Environment.GetEnvironmentVariable("TYW_ANIM_SHOTS_EXIT") == "1")
                 DispatcherTimer.RunOnce(Close, TimeSpan.FromMilliseconds(totalMs + 500));
+        }
+
+        // 实例管理窗口快照（调试用）
+        var instPath = Environment.GetEnvironmentVariable("TYW_SNAPSHOT_INSTANCE");
+        if (!string.IsNullOrEmpty(instPath))
+        {
+            DispatcherTimer.RunOnce(() =>
+            {
+                try
+                {
+                    var win = new InstanceWindow();
+                    win.Show(this);
+                    DispatcherTimer.RunOnce(() =>
+                    {
+                        try
+                        {
+                            var bmp = new Avalonia.Media.Imaging.RenderTargetBitmap(
+                                new PixelSize((int)win.ClientSize.Width, (int)win.ClientSize.Height), new Vector(96, 96));
+                            bmp.Render(win);
+                            bmp.Save(instPath);
+                            Console.WriteLine("instance snapshot saved: " + instPath);
+                        }
+                        catch (Exception ex) { Console.WriteLine("instance snapshot failed: " + ex.Message); }
+                        win.Close();
+                        if (Environment.GetEnvironmentVariable("TYW_SNAPSHOT_EXIT") == "1") Close();
+                    }, TimeSpan.FromMilliseconds(800));
+                }
+                catch (Exception ex) { Console.WriteLine("instance window failed: " + ex.Message); }
+            }, TimeSpan.FromMilliseconds(600));
+            return;
         }
 
         var path = Environment.GetEnvironmentVariable("TYW_SNAPSHOT");

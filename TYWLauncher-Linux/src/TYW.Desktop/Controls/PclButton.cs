@@ -39,6 +39,7 @@ public class PclButton : Border
             IsHitTestVisible = false,
             TextTrimming = TextTrimming.None,
             FontFamily = Pcl.FontFamily,
+            Margin = new Thickness(10, 0, 10, 0),
             Foreground = Pcl.Res("ColorBrush1")
         };
 
@@ -59,18 +60,21 @@ public class PclButton : Border
         PointerPressed += (_, e) =>
         {
             if (!_enabled) return;
+            e.Handled = true;
             _down = true;
             RefreshColor();
             ScaleTo(0.955, 80);
         };
         PointerReleased += (_, e) =>
         {
+            e.Handled = true;
             if (!_enabled) return;
             bool wasDown = _down;
             _down = false;
             RefreshColor();
             ScaleTo(1, 300);
-            if (wasDown && Bounds.Contains(e.GetPosition(this))) RaiseClick();
+            // Bounds 是相对父级的矩形，判断"松手在按钮内"要用自身尺寸
+            if (wasDown && new Rect(Bounds.Size).Contains(e.GetPosition(this))) RaiseClick();
         };
     }
 

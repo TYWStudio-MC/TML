@@ -1,5 +1,6 @@
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Input;
 using Avalonia.Layout;
 using Avalonia.Media;
 
@@ -69,6 +70,10 @@ public class PclCard : Border
 {
     private readonly TextBlock _title;
     private readonly StackPanel _body;
+    private readonly StackPanel _root;
+    private readonly Avalonia.Controls.Shapes.Path _arrow;
+    private bool _canSwap;
+    private bool _swapped;
 
     public PclCard()
     {
@@ -85,13 +90,34 @@ public class PclCard : Border
             Margin = new Thickness(15, 10, 15, 0),
             HorizontalAlignment = HorizontalAlignment.Left
         };
+        _arrow = new Avalonia.Controls.Shapes.Path
+        {
+            Data = Geometry.Parse("M2,4 l-2,2 10,10 10,-10 -2,-2 -8,8 -8,-8 z"),
+            Stretch = Stretch.Uniform,
+            Height = 6,
+            Width = 10,
+            Fill = Pcl.Res("ColorBrush1"),
+            HorizontalAlignment = HorizontalAlignment.Right,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0, 0, 16, 0),
+            RenderTransform = new RotateTransform(180),
+            IsHitTestVisible = false,
+            IsVisible = false
+        };
+        var header = new Grid { Height = 30, Background = Brushes.Transparent, Cursor = new Cursor(StandardCursorType.Hand) };
+        header.Children.Add(_title);
+        header.Children.Add(_arrow);
+        Grid.SetColumnSpan(_title, 2);
+
         _body = new StackPanel();
         Body = _body;
 
-        var stack = new StackPanel();
-        stack.Children.Add(_title);
-        stack.Children.Add(_body);
-        Child = stack;
+        _root = new StackPanel();
+        _root.Children.Add(header);
+        _root.Children.Add(_body);
+        Child = _root;
+
+        header.PointerReleased += (_, _) => { if (_canSwap) IsSwapped = !_swapped; };
     }
 
     public StackPanel Body { get; }
@@ -103,6 +129,53 @@ public class PclCard : Border
         {
             _title.Text = value ?? "";
             _title.IsVisible = !string.IsNullOrEmpty(value);
+        }
+    }
+
+    /// <summary>标题行是否可以点击折叠（对应 MyCard.CanSwap）。</summary>
+    public bool CanSwap
+    {
+        get => _canSwap;
+        set { _canSwap = value; _arrow.IsVisible = value; }
+    }
+
+    /// <summary>是否处于折叠状态（对应 MyCard.IsSwapped）。</summary>
+    public bool IsSwapped
+    {
+        get => _swapped;
+        set
+        {
+            if (_swapped == value) return;
+            _swapped = value;
+            // 与 Windows 版 MyCard 一致（SwapLogoRight=True）：折叠 270°（指向右），展开 180°（指向上）
+            _arrow.RenderTransform = new RotateTransform(value ? 270 : 180);
+            if (!IsLoaded)
+            {
+                // 还没进可视树（构造时设初值），直接定态，不播动画
+                _body.IsVisible = !value;
+                _body.Opacity = 1;
+                return;
+            }
+            if (value)
+            {
+                // 折叠：先淡出再隐藏
+                var tt = new TranslateTransform(0, 0);
+                _body.RenderTransform = tt;
+                _ = Ani.Tween(1, 0, 90, v => _body.Opacity = v).ContinueWith(_ =>
+                    Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+                    {
+                        if (_swapped) _body.IsVisible = false;
+                    }));
+            }
+            else
+            {
+                _body.IsVisible = true;
+                _body.Opacity = 0;
+                var tt = new TranslateTransform(0, -6);
+                _body.RenderTransform = tt;
+                _ = Ani.Tween(0, 1, 150, v => _body.Opacity = v, Ani.EaseOutFluent, 40);
+                _ = Ani.Tween(-6, 0, 220, v => tt.Y = v, Ani.EaseOutFluent, 40);
+            }
         }
     }
 }

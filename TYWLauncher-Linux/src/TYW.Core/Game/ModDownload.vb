@@ -489,7 +489,7 @@ Public Module ModDownload
                             resp.EnsureSuccessStatusCode()
                             Using src = Await resp.Content.ReadAsStreamAsync(cts.Token)
                                 Using dst As New FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None, 81920, True)
-                                    Await src.CopyToAsync(dst, 81920, cts.Token)
+                                    Await CopyCounted(src, dst, 81920, cts.Token)
                                 End Using
                             End Using
                         End Using
@@ -509,6 +509,49 @@ Public Module ModDownload
         Next
         Throw New Exception("下载失败：" & url & " —— " & lastEx?.Message, lastEx)
     End Function
+
+#Region "下载速度（对应 Windows 版 NetManager.Speed）"
+
+    Private ReadOnly SpeedLock As New Object
+    Private TotalBytes As Long = 0
+    Private ReadOnly SpeedSamples As New List(Of Tuple(Of Date, Long))
+
+    ''' <summary>复制流的同时累计字节数。</summary>
+    Private Async Function CopyCounted(src As Stream, dst As Stream, bufSize As Integer, token As CancellationToken) As Task
+        Dim buf(bufSize - 1) As Byte
+        Dim n = Await src.ReadAsync(buf, 0, bufSize, token)
+        Do While n > 0
+            Interlocked.Add(TotalBytes, n)
+            Await dst.WriteAsync(buf, 0, n, token)
+            n = Await src.ReadAsync(buf, 0, bufSize, token)
+        Loop
+    End Function
+
+    ''' <summary>最近约 1 秒的下载速度（字节/秒）。在 UI 刷新时调用即可。</summary>
+    Public Function Speed() As Long
+        SyncLock SpeedLock
+            Dim now = Date.UtcNow
+            Dim total = Interlocked.Read(TotalBytes)
+            SpeedSamples.Add(Tuple.Create(now, total))
+            SpeedSamples.RemoveAll(Function(s) (now - s.Item1).TotalSeconds > 1.3)
+            If SpeedSamples.Count < 2 Then Return 0
+            Dim delta = SpeedSamples(SpeedSamples.Count - 1).Item2 - SpeedSamples(0).Item2
+            Dim secs = (SpeedSamples(SpeedSamples.Count - 1).Item1 - SpeedSamples(0).Item1).TotalSeconds
+            If secs <= 0.05 Then Return 0
+            Return CLng(delta / secs)
+        End SyncLock
+    End Function
+
+    ''' <summary>字节数转人类可读（对应 StringUtils.FormatByteSize，Windows 版显示如 5.2 M/s）。</summary>
+    Public Function FormatSpeed(bytesPerSec As Long) As String
+        Dim b = Math.Max(0, bytesPerSec)
+        If b >= 1024 * 1024 * 1024 Then Return (b / 1024 / 1024 / 1024).ToString("0.0") & " G/s"
+        If b >= 1024 * 1024 Then Return (b / 1024 / 1024).ToString("0.0") & " M/s"
+        If b >= 1024 Then Return (b / 1024).ToString("0.0") & " K/s"
+        Return b & " B/s"
+    End Function
+
+#End Region
 
     ''' <summary>老版本（1.6 及以前）需要把 objects 复制到 virtual/legacy。</summary>
     Private Sub CopyLegacyAssetsIfNeeded()

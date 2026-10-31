@@ -60,14 +60,25 @@ public class PclNavButton : Border
 
         PointerEntered += (_, _) => { _hover = true; RefreshColor(); };
         PointerExited += (_, _) => { _hover = false; _down = false; RefreshColor(); };
-        PointerPressed += (_, _) => { _down = true; RefreshColor(); };
-        PointerReleased += (_, _) =>
+        PointerPressed += (_, e) =>
         {
+            // 必须吃掉事件：标题栏的拖动处理器挂在父级 Grid 上，
+            // 事件冒泡上去会立刻 BeginMoveDrag，PointerReleased 就再也回不到按钮，点击等于失效。
+            e.Handled = true;
+            _down = true;
+            _lastPoint = e.GetPosition(this);
+            RefreshColor();
+        };
+        PointerReleased += (_, e) =>
+        {
+            e.Handled = true;
             bool wasDown = _down;
             _down = false;
             RefreshColor();
-            if (wasDown && Bounds.Contains(_lastPoint)) Click?.Invoke(this, EventArgs.Empty);
+            // Bounds 是相对父级的矩形，判断"松手在按钮内"要用自身尺寸
+            if (wasDown && new Rect(Bounds.Size).Contains(e.GetPosition(this))) Click?.Invoke(this, EventArgs.Empty);
         };
+        PointerMoved += (_, e) => _lastPoint = e.GetPosition(this);
         PointerMoved += (_, e) => _lastPoint = e.GetPosition(this);
     }
 

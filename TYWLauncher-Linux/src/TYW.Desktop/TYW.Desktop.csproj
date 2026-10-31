@@ -24,4 +24,10 @@
     <ProjectReference Include="..\TYW.Core\TYW.Core.vbproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- 内置默认皮肤（离线头像用 Steve 正脸，与 Windows 版一致） -->
+    <AvaloniaResource Include="Assets\**\*.png" />
+    <AvaloniaResource Include="Assets\**\*.json" />
+  </ItemGroup>
+
 </Project>

@@ -15,7 +15,10 @@ public class PclListItem : Border
 {
     private readonly Border _check;
     private readonly Path _logo;
+    private readonly Image _logoImg;
+    private readonly StackPanel _textStack;
     private readonly TextBlock _lab;
+    private readonly TextBlock _info;
     private bool _checked;
     private bool _hover;
 
@@ -34,10 +37,10 @@ public class PclListItem : Border
 
         _check = new Border
         {
-            Width = 5,
+            Width = 4,
             CornerRadius = new CornerRadius(2),
             Background = Pcl.Res("ColorBrush3"),
-            Margin = new Thickness(-1, 6, 0, 6),
+            Margin = new Thickness(0, 6, 0, 6),
             HorizontalAlignment = HorizontalAlignment.Left,
             IsVisible = false
         };
@@ -55,6 +58,17 @@ public class PclListItem : Border
         Grid.SetColumn(_logo, 1);
         grid.Children.Add(_logo);
 
+        _logoImg = new Image
+        {
+            Margin = new Thickness(6, 5, 4, 5),
+            Stretch = Stretch.Uniform,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+            IsVisible = false
+        };
+        Grid.SetColumn(_logoImg, 1);
+        grid.Children.Add(_logoImg);
+
         _lab = new TextBlock
         {
             FontSize = 14,
@@ -64,8 +78,21 @@ public class PclListItem : Border
             VerticalAlignment = VerticalAlignment.Center,
             TextTrimming = TextTrimming.CharacterEllipsis
         };
-        Grid.SetColumn(_lab, 2);
-        grid.Children.Add(_lab);
+        // 有 Info 时标题 + 副标题上下排列（对应 MyListItem 的 LabTitle / LabInfo）
+        _info = new TextBlock
+        {
+            FontSize = 11,
+            FontFamily = Pcl.FontFamily,
+            Foreground = Pcl.Res("ColorBrushGray2"),
+            Margin = new Thickness(4, 1, 0, 0),
+            IsVisible = false,
+            TextTrimming = TextTrimming.CharacterEllipsis
+        };
+        _textStack = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+        _textStack.Children.Add(_lab);
+        _textStack.Children.Add(_info);
+        Grid.SetColumn(_textStack, 2);
+        grid.Children.Add(_textStack);
 
         Child = grid;
 
@@ -88,6 +115,38 @@ public class PclListItem : Border
             _logo.Data = value;
             _logo.IsVisible = value is not null;
         }
+    }
+
+    /// <summary>图片图标（资源列表的工程 Logo）。</summary>
+    public IImage? LogoImage
+    {
+        get => _logoImg.Source;
+        set
+        {
+            _logoImg.Source = value;
+            _logoImg.IsVisible = value is not null;
+            if (value is not null) _logo.IsVisible = false;
+        }
+    }
+
+    /// <summary>副标题（灰色小字）。对应 MyListItem.Info。设置后标题字号微调、行高自适应。</summary>
+    public string Info
+    {
+        get => _info.Text ?? "";
+        set
+        {
+            _info.Text = value ?? "";
+            bool has = !string.IsNullOrEmpty(value);
+            _info.IsVisible = has;
+            _lab.FontSize = has ? 13 : 14;
+        }
+    }
+
+    /// <summary>图标着色（版本类型图标用，对应 MyListItem 的 Logo 图片色）。</summary>
+    public IBrush? LogoTint
+    {
+        get => _logo.Fill;
+        set => _logo.Fill = value ?? Pcl.Res("ColorBrush3");
     }
 
     public bool Checked

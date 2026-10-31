@@ -16,6 +16,13 @@ Public Class LaunchOptions
     Public Property MaxRamMb As Integer = 2048
     Public Property GameDir As String = ""
     Public Property ExtraArgs As New List(Of String)
+    ''' <summary>窗口化时的宽高（0 = 用版本 JSON 里的默认值）。</summary>
+    Public Property WindowWidth As Integer = 0
+    Public Property WindowHeight As Integer = 0
+    ''' <summary>全屏启动。</summary>
+    Public Property Fullscreen As Boolean = False
+    ''' <summary>额外 JVM 参数（空格分隔）。</summary>
+    Public Property JvmExtra As String = ""
 End Class
 
 ''' <summary>合并 inheritsFrom 之后的版本描述。</summary>
@@ -111,7 +118,9 @@ Public Module ModLaunch
         args.AddRange(BuildJvmArgs(merged, opt, nativesDir, classpath))
         If merged.MainClass = "" Then Throw New Exception("版本 JSON 缺少 MainClass，文件可能已损坏")
         args.Add(merged.MainClass)
-        args.AddRange(BuildGameArgs(merged, opt, gameDir, assetsRoot))
+        Dim gameArgs = BuildGameArgs(merged, opt, gameDir, assetsRoot)
+        gameArgs = ApplyWindowArgs(gameArgs, opt)
+        args.AddRange(gameArgs)
         args.AddRange(opt.ExtraArgs)
 
         ' --- 起进程 ---
@@ -395,7 +404,49 @@ Public Module ModLaunch
             list.Add("-cp")
             list.Add(classpath)
         End If
+
+        ' 用户自定义 JVM 参数（设置 → 启动 → 高级）
+        If Not String.IsNullOrWhiteSpace(opt.JvmExtra) Then
+            For Each a In Regex.Split(opt.JvmExtra.Trim(), "\s+")
+                If a <> "" Then list.Add(a)
+            Next
+        End If
         Return list
+    End Function
+
+    ''' <summary>
+    ''' 按设置改写窗口参数：全屏优先；否则用自定义宽高覆盖版本 JSON 里的 --width/--height。
+    ''' 对应 Windows 版 PageSetupLaunch 的「窗口大小」设置。
+    ''' </summary>
+    Private Function ApplyWindowArgs(args As List(Of String), opt As LaunchOptions) As List(Of String)
+        Dim hasFullscreen = args.Contains("--fullscreen")
+        If opt.Fullscreen Then
+            If Not hasFullscreen Then args.Add("--fullscreen")
+            Return args
+        End If
+        If hasFullscreen Then args.Remove("--fullscreen")
+        If opt.WindowWidth <= 0 OrElse opt.WindowHeight <= 0 Then Return args
+
+        Dim out As New List(Of String)
+        Dim i = 0
+        While i < args.Count
+            Dim a = args(i)
+            If (a = "--width" OrElse a = "--height") AndAlso i + 1 < args.Count Then
+                i += 2
+                Continue While
+            End If
+            If a.StartsWith("--width=") OrElse a.StartsWith("--height=") Then
+                i += 1
+                Continue While
+            End If
+            out.Add(a)
+            i += 1
+        End While
+        out.Add("--width")
+        out.Add(opt.WindowWidth.ToString())
+        out.Add("--height")
+        out.Add(opt.WindowHeight.ToString())
+        Return out
     End Function
 
     Private Function BuildGameArgs(merged As MergedVersion, opt As LaunchOptions, gameDir As String, assetsRoot As String) As List(Of String)
