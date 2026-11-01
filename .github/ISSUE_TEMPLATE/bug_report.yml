@@ -11,7 +11,7 @@ body:
   - type: input
     id: version
     attributes:
-      label: 软件版本/Software version *
+      label: 软件版本/Software version 
       description: 例如 v1.2.3 或 commit hash/For example, v1.2.3 or commit hash
       placeholder: v1.2.3
     validations:
@@ -20,7 +20,7 @@ body:
   - type: dropdown
     id: VersionChannel
     attributes:
-      label: 版本通道/VersionChannel *
+      label: 版本通道/VersionChannel 
       options:
         - 正式版/Release Version
         - 快照版/Snapshot Verion
@@ -31,7 +31,7 @@ body:
   - type: dropdown
     id: os
     attributes:
-      label: 操作系统/Operating system *
+      label: 操作系统/Operating system 
       options:
         - Windows
         - Linux
@@ -42,7 +42,7 @@ body:
   - type: textarea
     id: steps
     attributes:
-      label: 问题是如何出现的/How did the problem come up? *
+      label: 问题是如何出现的/How did the problem come up? 
       placeholder: |
         1. 打开 xxx / Open xxx
         2. 点击 xxx / Click xxx
@@ -53,14 +53,14 @@ body:
   - type: textarea
     id: expected
     attributes:
-      label: 您希望解决什么/What do you want to solve? *
+      label: 您希望解决什么/What do you want to solve? 
     validations:
       required: true
 
   - type: textarea
     id: actual
     attributes:
-      label: 实际行为/Actual behavior *
+      label: 实际行为/Actual behavior 
     validations:
       required: true
 
