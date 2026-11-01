@@ -1,0 +1,98 @@
+name: 报错崩溃反馈/Error crash feedback
+description: 请按表格字段填写，方便我们排查/Please fill it out according to the table fields, so it's easier for us to check.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        下面每一项都请认真填，带 * 的是必填./Please fill out each item below carefully, the ones with * are required.
+
+  - type: input
+    id: version
+    attributes:
+      label: 软件版本/Software version *
+      description: 例如 v1.2.3 或 commit hash/For example, v1.2.3 or commit hash
+      placeholder: v1.2.3
+    validations:
+      required: true
+      
+  - type: dropdown
+    id: VersionChannel
+    attributes:
+      label: 版本通道/VersionChannel *
+      options:
+        - 正式版/Release Version
+        - 快照版/Snapshot Verion
+        - 内测版/Debug Version
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: 操作系统/Operating system *
+      options:
+        - Windows
+        - Linux
+        - 其他/Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 问题是如何出现的/How did the problem come up? *
+      placeholder: |
+        1. 打开 xxx / Open xxx
+        2. 点击 xxx / Click xxx
+        3. 看到 xxx / View xxx
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 您希望解决什么/What do you want to solve? *
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际行为/Actual behavior *
+    validations:
+      required: true
+
+  - type: upload
+    id: screenshots
+    attributes:
+      label: 截图/录屏|Screenshot/Screen Recording
+      description: 拖进来就行/Just drag it in
+      
+  - type: input
+    id: DeviceCode
+    attributes:
+      label: 设备码/Device Code 
+      description: 提交设备码可以帮助我们快速排查问题(在设置,其他中的启动器栏目复制设备码)/Submitting your device code can help us quickly troubleshoot issues (copy the device code from the Launcher section under Settings > Others)
+      placeholder: xxxx-xxxx-xxxx-xxxx
+  - type: input
+    id: Language
+    attributes:
+      label: 语言/Language 
+      description: 可以让我们对你使用的语言进行排查及回复/This allows us to check and respond to the language you're using.
+      placeholder: 你的语言/Your Language
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: 提交前确认，否则我们将关闭您的Issue/Make sure to confirm before submitting, or we'll close your issue.
+      options:
+        - label: 我已经搜索过，没有重复的 Issue/I've already searched, there are no duplicate issues.
+          required: true
+  - type: checkboxes
+    id: confirm2
+    attributes:
+      label: 提交前确认，否则我们将关闭或删除您的Issue/Make sure to confirm before submitting, or we'll close your issue.
+      options:
+        - label: 我承诺我不会提交有关推广和营销以及涉及中国及您当地法律的Issue/I promise I won't submit anything about promotion and marketing or issues involving Chinese and your local laws.
+          required: true
